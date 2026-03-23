@@ -5,60 +5,8 @@ import numpy as np
 st.set_page_config(
     page_title="MediDose Pro",
     page_icon="💊",
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    layout="centered"
 )
-
-# Мобильная адаптация
-st.markdown("""
-<style>
-    .main > div {
-        padding: 1rem 0.5rem;
-    }
-    .stButton > button {
-        width: 100%;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        border-radius: 12px;
-        padding: 0.75rem;
-        font-size: 1rem;
-        font-weight: 600;
-    }
-    .stSelectbox > div > div {
-        border-radius: 12px;
-    }
-    .stNumberInput > div > div > input {
-        border-radius: 12px;
-    }
-    .stAlert {
-        border-radius: 12px;
-    }
-    h1 {
-        text-align: center;
-        font-size: 1.8rem !important;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 12px;
-        padding: 1rem;
-        text-align: center;
-        color: white;
-    }
-    .indications-box {
-        background: #f0f2f6;
-        border-radius: 12px;
-        padding: 1rem;
-        margin-top: 1rem;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Расчет BSA
-def calculate_bsa(weight, height):
-    if weight > 0 and height > 0:
-        return round(np.sqrt((weight * height) / 3600), 2)
-    return None
 
 # Загрузка Excel
 @st.cache_data
@@ -86,30 +34,32 @@ def load_data():
         return None, None, None
 
 # Поиск подходящей дозировки
-def find_dose(row, age, weight, egfr):
-    if row is None:
-        return None
+def find_dose_row(df, drug_name, age, weight, egfr):
+    drug_df = df[df['generic_name'].str.contains(drug_name, case=False, na=False)]
     
-    # Проверка возраста
-    if pd.notna(row.get('age_min')) and age < row['age_min']:
-        return None
-    if pd.notna(row.get('age_max')) and age > row['age_max']:
-        return None
+    for _, row in drug_df.iterrows():
+        # Проверка возраста
+        if pd.notna(row.get('age_min')) and age < row['age_min']:
+            continue
+        if pd.notna(row.get('age_max')) and age > row['age_max']:
+            continue
+        
+        # Проверка веса
+        if pd.notna(row.get('weight_min')) and weight < row['weight_min']:
+            continue
+        if pd.notna(row.get('weight_max')) and weight > row['weight_max']:
+            continue
+        
+        # Проверка СКФ
+        if egfr is not None:
+            if pd.notna(row.get('egfr_min')) and egfr < row['egfr_min']:
+                continue
+            if pd.notna(row.get('egfr_max')) and egfr > row['egfr_max']:
+                continue
+        
+        return row
     
-    # Проверка веса
-    if pd.notna(row.get('weight_min')) and weight < row['weight_min']:
-        return None
-    if pd.notna(row.get('weight_max')) and weight > row['weight_max']:
-        return None
-    
-    # Проверка СКФ
-    if egfr is not None:
-        if pd.notna(row.get('egfr_min')) and egfr < row['egfr_min']:
-            return None
-        if pd.notna(row.get('egfr_max')) and egfr > row['egfr_max']:
-            return None
-    
-    return row
+    return None
 
 # Расчет дозы
 def calculate_dose(row, weight):
@@ -121,155 +71,91 @@ def calculate_dose(row, weight):
     
     if pd.notna(dose_per_kg):
         calculated = dose_per_kg * weight
-        warning = ""
         if pd.notna(max_daily) and calculated > max_daily:
             calculated = max_daily
-            warning = f"⚠️ Макс. суточная: {max_daily} {dose_unit}"
-        return {
-            'dose': f"{calculated:.0f} {dose_unit}",
-            'freq': frequency,
-            'warning': warning
-        }
+            return f"{calculated:.0f} {dose_unit}", frequency, True
+        return f"{calculated:.0f} {dose_unit}", frequency, False
     elif pd.notna(dose_fixed):
-        return {
-            'dose': f"{dose_fixed} {dose_unit}",
-            'freq': frequency,
-            'warning': ""
-        }
-    return None
+        return f"{dose_fixed} {dose_unit}", frequency, False
+    return None, None, False
 
 def main():
+    st.title("💊 MediDose Pro")
+    st.markdown("---")
+    
     # Загрузка данных
     data, sheets, indications_df = load_data()
     if data is None:
-        st.error("❌ Файл drug_database_full.xlsx не найден")
-        st.info("Убедитесь, что файл загружен в репозиторий")
+        st.error("❌ Ошибка загрузки данных")
         return
     
-    st.title("💊 MediDose Pro")
-    st.caption("Калькулятор доз лекарственных препаратов")
-    st.divider()
-    
-    # Инициализация состояния
-    if 'calculated' not in st.session_state:
-        st.session_state.calculated = False
-    if 'dose_result' not in st.session_state:
-        st.session_state.dose_result = None
-    if 'selected_drug' not in st.session_state:
-        st.session_state.selected_drug = None
-    if 'drug_info' not in st.session_state:
-        st.session_state.drug_info = None
-    if 'show_info' not in st.session_state:
-        st.session_state.show_info = False
-    
     # Выбор группы
-    group = st.selectbox("Группа препаратов", sheets)
+    group = st.selectbox("Группа", sheets)
     df = data[group]
     
     # Поиск
-    search = st.text_input("🔍 Поиск", placeholder="Введите название...")
     drugs = sorted(df['generic_name'].unique())
-    if search:
-        drugs = [d for d in drugs if search.lower() in d.lower()]
-    
-    drug = st.selectbox("Препарат", drugs, key="drug_select")
+    drug = st.selectbox("Препарат", drugs)
     
     # Параметры
-    st.subheader("Параметры пациента")
-    
     col1, col2 = st.columns(2)
     with col1:
-        age = st.number_input("Возраст (лет)", min_value=0.0, max_value=120.0, value=30.0)
-        weight = st.number_input("Вес (кг)", min_value=0.5, max_value=300.0, value=70.0)
+        age = st.number_input("Возраст (лет)", min_value=0.0, value=30.0, step=1.0)
+        weight = st.number_input("Вес (кг)", min_value=0.5, value=70.0, step=1.0)
     with col2:
-        height = st.number_input("Рост (см)", min_value=50.0, max_value=250.0, value=170.0)
+        height = st.number_input("Рост (см)", min_value=50.0, value=170.0, step=1.0)
         if height > 0 and weight > 0:
-            bsa = calculate_bsa(weight, height)
+            bsa = round(np.sqrt((weight * height) / 3600), 2)
             st.caption(f"BSA: {bsa} м²")
     
     use_egfr = st.checkbox("Учитывать СКФ")
     egfr = None
     if use_egfr:
-        egfr = st.number_input("СКФ (мл/мин)", min_value=0.0, max_value=200.0, value=90.0)
+        egfr = st.number_input("СКФ (мл/мин)", min_value=0.0, value=90.0, step=5.0)
     
-    st.divider()
+    st.markdown("---")
     
-    # Кнопка расчета
-    if st.button("💊 РАССЧИТАТЬ ДОЗУ", type="primary"):
-        # Ищем подходящую строку
-        drug_df = df[df['generic_name'].str.contains(drug, case=False, na=False)]
-        matching_row = None
+    # Расчет
+    if st.button("💊 Рассчитать дозу", type="primary"):
+        row = find_dose_row(df, drug, age, weight, egfr)
         
-        for _, row in drug_df.iterrows():
-            matched = find_dose(row, age, weight, egfr)
-            if matched is not None:
-                matching_row = matched
-                break
-        
-        if matching_row is None:
-            st.error("❌ Нет подходящей дозировки для указанных параметров")
-            st.session_state.calculated = False
-            st.session_state.dose_result = None
+        if row is None:
+            st.error("❌ Не найдено подходящей дозировки")
         else:
-            result = calculate_dose(matching_row, weight)
-            if result:
-                st.session_state.dose_result = result
-                st.session_state.calculated = True
-                st.session_state.selected_drug = drug
-                st.session_state.show_info = False
+            dose, freq, limited = calculate_dose(row, weight)
+            
+            if dose:
+                st.success("✅ Результат расчета")
+                st.markdown(f"### 💊 {drug}")
+                st.markdown(f"**Разовая доза:** {dose}")
+                if freq:
+                    st.markdown(f"**Кратность:** {freq}")
+                if limited:
+                    st.warning("⚠️ Доза ограничена максимальной суточной")
+                if pd.notna(row.get('special')):
+                    st.info(f"ℹ️ {row['special']}")
+                
+                # Сохраняем для показаний
+                st.session_state['last_drug'] = drug
             else:
-                st.error("❌ Ошибка расчета дозы")
+                st.error("❌ Ошибка расчета")
     
-    # Отображение результата
-    if st.session_state.calculated and st.session_state.dose_result:
-        st.success("✅ Доза рассчитана")
-        
-        res = st.session_state.dose_result
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size: 0.8rem;">РАЗОВАЯ ДОЗА</div>
-                <div style="font-size: 1.8rem; font-weight: bold;">{res['dose']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_b:
-            freq_text = res['freq'] if res['freq'] else "по назначению"
-            st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size: 0.8rem;">КРАТНОСТЬ</div>
-                <div style="font-size: 1.2rem; font-weight: bold;">{freq_text}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        if res['warning']:
-            st.warning(res['warning'])
-        
-        st.divider()
+    st.markdown("---")
     
-    # Кнопка показаний
-    if st.session_state.calculated and st.session_state.selected_drug:
-        if st.button("📚 ПОКАЗАТЬ ПОКАЗАНИЯ"):
+    # Показания
+    if 'last_drug' in st.session_state:
+        if st.button("📚 Показания"):
             if indications_df is not None:
-                matching = indications_df[indications_df['drug_name'].str.contains(
-                    st.session_state.selected_drug, case=False, na=False
+                match = indications_df[indications_df['drug_name'].str.contains(
+                    st.session_state['last_drug'], case=False, na=False
                 )]
-                if not matching.empty:
-                    st.session_state.drug_info = matching.iloc[0]['indications']
+                if not match.empty:
+                    st.markdown("### 📋 Показания")
+                    st.info(match.iloc[0]['indications'])
                 else:
-                    st.session_state.drug_info = None
-                st.session_state.show_info = True
+                    st.warning("Показания не найдены")
             else:
-                st.warning("Лист 'Показания' не найден")
-        
-        # Отображение показаний
-        if st.session_state.show_info:
-            if st.session_state.drug_info:
-                st.markdown("### 📋 Показания")
-                st.info(st.session_state.drug_info)
-                st.caption("*Источник: локальная база данных*")
-            else:
-                st.warning(f"Показания для '{st.session_state.selected_drug}' не найдены")
+                st.warning("Лист 'Показания' отсутствует")
 
 if __name__ == "__main__":
     main()
